@@ -44,9 +44,9 @@ type Config struct {
 	PingMode        string
 	// UA 是上报请求的自定义 User-Agent，由服务端通过独立通道下发（不参与 ConfigMD5 比对），
 	// 本地安装参数 -ua 只作为初值。
-	UA         string
-	AutoUpdate bool
-	UpdateProxy     string
+	UA          string
+	AutoUpdate  bool
+	UpdateProxy string
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like
 	// AutoUpdate and UpdateProxy are intentionally outside that comparison.
 	ConfigMD5 string
@@ -135,22 +135,33 @@ type Metrics struct {
 	UDPConn      string
 	IPv4         string
 	IPv6         string
-	PingCT       any
-	PingCU       any
-	PingCM       any
-	PingBD       any
-	PingNode1    any
-	PingNode2    any
-	PingNode3    any
-	PingNode4    any
-	LossCT       any
-	LossCU       any
-	LossCM       any
-	LossBD       any
-	LossNode1    any
-	LossNode2    any
-	LossNode3    any
-	LossNode4    any
+	// X-UI 面板日报字段（探针接手面板 @daily 日报；x-ui 不存在时留空/0）。
+	Hostname            string
+	PanelVersion        string
+	XrayVersion         string
+	XrayState           string
+	OnlineClients       string
+	OnlineClientEmails  string
+	XUIInboundsDisabled string
+	XUIInboundsDepleted string
+	XUIClientsDisabled  string
+	XUIClientsDepleted  string
+	PingCT              any
+	PingCU              any
+	PingCM              any
+	PingBD              any
+	PingNode1           any
+	PingNode2           any
+	PingNode3           any
+	PingNode4           any
+	LossCT              any
+	LossCU              any
+	LossCM              any
+	LossBD              any
+	LossNode1           any
+	LossNode2           any
+	LossNode3           any
+	LossNode4           any
 }
 
 type BasicStats struct {

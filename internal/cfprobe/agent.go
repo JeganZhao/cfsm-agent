@@ -64,9 +64,11 @@ type Agent struct {
 	updateMu         sync.Mutex
 	// configWriteMu 串行化配置文件写入：动态配置下发与 UA 下发是两条独立通道，
 	// 并发写会把对方的字段覆盖回旧值。
-	configWriteMu    sync.Mutex
-	reporter         *reportTransport
-	reportMu         sync.Mutex
+	configWriteMu sync.Mutex
+	reporter      *reportTransport
+	reportMu      sync.Mutex
+	// xuiOnline 是 x-ui 在线客户 poller（5 秒 poll 一次 gRPC，20 秒宽限）。
+	xuiOnline *xuiOnlineTracker
 	// reportFailures 是 WSS 与 POST 共用的连续失败计数：握手 401/403、WSS error 帧、
 	// POST 4xx/5xx、WS close 1008 都计入，任意一次成功（POST 2xx、非实时提示 ack、
 	// 或 WSS 握手通过）清零。
@@ -243,6 +245,8 @@ func Run(instance, configFile string, debug bool, version string) error {
 	}
 	a.resetNetworkBaseline(cfg.Interface)
 	a.reporter = newReportTransport(a)
+	a.xuiOnline = newXUIOnlineTracker(a.log)
+	go a.xuiOnline.run(ctx)
 	a.basic = collectBasicStats()
 	a.basicAt = time.Now()
 
@@ -813,50 +817,61 @@ func (a *Agent) buildMetrics(cfg Config, cpu string, netNow NetBytes, rxSpeed, t
 	probes := a.probes
 	a.mu.RUnlock()
 	b := a.basic
+	xui := collectXUIStats(a.log, a.xuiOnline)
 	return Metrics{
-		CPU:          cpu,
-		RAMTotal:     uintString(b.MemTotalMB),
-		RAMUsed:      uintString(b.MemUsedMB),
-		SwapTotal:    uintString(b.SwapTotalMB),
-		SwapUsed:     uintString(b.SwapUsedMB),
-		DiskTotal:    uintString(b.DiskTotalMB),
-		DiskUsed:     uintString(b.DiskUsedMB),
-		Disk:         diskIO,
-		LoadAvg:      firstNonEmpty(b.LoadAvg, "0 0 0"),
-		BootTime:     strconv.FormatInt(b.BootTimeMS, 10),
-		NetRX:        uintString(netNow.RX),
-		NetTX:        uintString(netNow.TX),
-		NetRXMonthly: uintString(rxMonthly),
-		NetTXMonthly: uintString(txMonthly),
-		NetInSpeed:   uintString(rxSpeed),
-		NetOutSpeed:  uintString(txSpeed),
-		OS:           firstNonEmpty(b.OSName, runtime.GOOS),
-		Arch:         firstNonEmpty(b.Arch, fallbackArch()),
-		Kernel:       b.Kernel,
-		CPUInfo:      firstNonEmpty(b.CPUInfo, fallbackArch()),
-		CPUCores:     intString(b.CPUCores),
-		GPUInfo:      b.GPUInfo,
-		Processes:    intString(b.Processes),
-		TCPConn:      intString(b.TCPConn),
-		UDPConn:      intString(b.UDPConn),
-		IPv4:         firstNonEmpty(probes.IPv4, "0"),
-		IPv6:         firstNonEmpty(probes.IPv6, "0"),
-		PingCT:       probeRTTValue(cfg.CTNode, probes.CT),
-		PingCU:       probeRTTValue(cfg.CUNode, probes.CU),
-		PingCM:       probeRTTValue(cfg.CMNode, probes.CM),
-		PingBD:       probeRTTValue(cfg.BDNode, probes.BD),
-		PingNode1:    probeRTTValue(cfg.Node1, probes.Node1),
-		PingNode2:    probeRTTValue(cfg.Node2, probes.Node2),
-		PingNode3:    probeRTTValue(cfg.Node3, probes.Node3),
-		PingNode4:    probeRTTValue(cfg.Node4, probes.Node4),
-		LossCT:       probeLossValue(cfg.CTNode, probes.CT),
-		LossCU:       probeLossValue(cfg.CUNode, probes.CU),
-		LossCM:       probeLossValue(cfg.CMNode, probes.CM),
-		LossBD:       probeLossValue(cfg.BDNode, probes.BD),
-		LossNode1:    probeLossValue(cfg.Node1, probes.Node1),
-		LossNode2:    probeLossValue(cfg.Node2, probes.Node2),
-		LossNode3:    probeLossValue(cfg.Node3, probes.Node3),
-		LossNode4:    probeLossValue(cfg.Node4, probes.Node4),
+		CPU:                 cpu,
+		RAMTotal:            uintString(b.MemTotalMB),
+		RAMUsed:             uintString(b.MemUsedMB),
+		SwapTotal:           uintString(b.SwapTotalMB),
+		SwapUsed:            uintString(b.SwapUsedMB),
+		DiskTotal:           uintString(b.DiskTotalMB),
+		DiskUsed:            uintString(b.DiskUsedMB),
+		Disk:                diskIO,
+		LoadAvg:             firstNonEmpty(b.LoadAvg, "0 0 0"),
+		BootTime:            strconv.FormatInt(b.BootTimeMS, 10),
+		NetRX:               uintString(netNow.RX),
+		NetTX:               uintString(netNow.TX),
+		NetRXMonthly:        uintString(rxMonthly),
+		NetTXMonthly:        uintString(txMonthly),
+		NetInSpeed:          uintString(rxSpeed),
+		NetOutSpeed:         uintString(txSpeed),
+		OS:                  firstNonEmpty(b.OSName, runtime.GOOS),
+		Arch:                firstNonEmpty(b.Arch, fallbackArch()),
+		Kernel:              b.Kernel,
+		CPUInfo:             firstNonEmpty(b.CPUInfo, fallbackArch()),
+		CPUCores:            intString(b.CPUCores),
+		GPUInfo:             b.GPUInfo,
+		Processes:           intString(b.Processes),
+		TCPConn:             intString(b.TCPConn),
+		UDPConn:             intString(b.UDPConn),
+		IPv4:                firstNonEmpty(probes.IPv4, "0"),
+		IPv6:                firstNonEmpty(probes.IPv6, "0"),
+		Hostname:            xui.Hostname,
+		PanelVersion:        xui.PanelVersion,
+		XrayVersion:         xui.XrayVersion,
+		XrayState:           xui.XrayState,
+		OnlineClients:       intString(xui.OnlineClients),
+		OnlineClientEmails:  xui.OnlineClientEmails,
+		XUIInboundsDisabled: intString(xui.InboundsDisabled),
+		XUIInboundsDepleted: intString(xui.InboundsDepleted),
+		XUIClientsDisabled:  intString(xui.ClientsDisabled),
+		XUIClientsDepleted:  intString(xui.ClientsDepleted),
+		PingCT:              probeRTTValue(cfg.CTNode, probes.CT),
+		PingCU:              probeRTTValue(cfg.CUNode, probes.CU),
+		PingCM:              probeRTTValue(cfg.CMNode, probes.CM),
+		PingBD:              probeRTTValue(cfg.BDNode, probes.BD),
+		PingNode1:           probeRTTValue(cfg.Node1, probes.Node1),
+		PingNode2:           probeRTTValue(cfg.Node2, probes.Node2),
+		PingNode3:           probeRTTValue(cfg.Node3, probes.Node3),
+		PingNode4:           probeRTTValue(cfg.Node4, probes.Node4),
+		LossCT:              probeLossValue(cfg.CTNode, probes.CT),
+		LossCU:              probeLossValue(cfg.CUNode, probes.CU),
+		LossCM:              probeLossValue(cfg.CMNode, probes.CM),
+		LossBD:              probeLossValue(cfg.BDNode, probes.BD),
+		LossNode1:           probeLossValue(cfg.Node1, probes.Node1),
+		LossNode2:           probeLossValue(cfg.Node2, probes.Node2),
+		LossNode3:           probeLossValue(cfg.Node3, probes.Node3),
+		LossNode4:           probeLossValue(cfg.Node4, probes.Node4),
 	}
 }
 
